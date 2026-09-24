@@ -5,7 +5,13 @@ No Tokenpet, API key, server, subscription or network connection required.
 
 ## Use
 
-Open `dist/Codex Token Bar.app`. The menu bar shows, for example:
+Download the ZIP for your Mac from
+[Releases](https://github.com/thorstendb-ARM/codex-token-bar/releases): `arm64` for
+Apple Silicon or `x86_64` for Intel. Extract it, move `Codex Token Bar.app` to
+`~/Applications` and open it. Requires macOS 13 or later. The app is ad-hoc signed,
+not notarized by Apple.
+
+The menu bar shows, for example:
 
 ```text
 D: 12.3M / $4.56
