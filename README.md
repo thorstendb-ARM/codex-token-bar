@@ -5,9 +5,9 @@ No Tokenpet, API key, server, subscription or network connection required.
 
 ## Use
 
-Download the ZIP for your Mac from
-[Releases](https://github.com/thorstendb-ARM/codex-token-bar/releases): `arm64` for
-Apple Silicon or `x86_64` for Intel. Extract it, move `Codex Token Bar.app` to
+Download the Apple Silicon (`arm64`) ZIP from
+[Releases](https://github.com/thorstendb-ARM/codex-token-bar/releases).
+Extract it, move `Codex Token Bar.app` to
 `~/Applications` and open it. Requires macOS 13 or later. The app is ad-hoc signed,
 not notarized by Apple.
 
@@ -44,9 +44,9 @@ The test wrapper also locates Swift Testing in Command Line Tools-only installat
 ### CI builds
 
 [macOS Release Build](https://github.com/thorstendb-ARM/codex-token-bar/actions/workflows/release-build.yml)
-runs tests and builds release apps for Apple Silicon (`arm64`) and Intel (`x86_64`)
+runs tests and builds the release app for Apple Silicon (`arm64`)
 on pushes to `main`, version tags (`v*`), pull requests and manual runs.
-Download the matching artifact from a successful workflow run and extract the app ZIP.
+Download the artifact from a successful workflow run and extract the app ZIP.
 Artifacts are retained for 14 days. These builds are ad-hoc signed, not notarized;
 the workflow does not automatically publish GitHub Releases.
 

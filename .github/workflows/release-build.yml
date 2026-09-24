@@ -17,20 +17,11 @@ concurrency:
 
 jobs:
   build:
-    name: Release (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+    name: Release (arm64)
+    runs-on: macos-15
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-          - runner: macos-15-intel
-            arch: x86_64
     env:
-      ARTIFACT_NAME: codex-token-bar-macos-${{ matrix.arch }}
-      EXPECTED_ARCH: ${{ matrix.arch }}
+      ARTIFACT_NAME: codex-token-bar-macos-arm64
     defaults:
       run:
         shell: bash
@@ -54,7 +45,7 @@ jobs:
       - name: Verify release binary
         run: |
           binary="dist/Codex Token Bar.app/Contents/MacOS/CodexTokenBar"
-          lipo "$binary" -verify_arch "$EXPECTED_ARCH"
+          lipo "$binary" -verify_arch arm64
           "$binary" --help
 
       - name: Package app
