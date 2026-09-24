@@ -35,6 +35,15 @@ The build is signed locally (ad-hoc), not notarized for public distribution. The
 resulting `.app` can be moved to `~/Applications` manually.
 The test wrapper also locates Swift Testing in Command Line Tools-only installations.
 
+### CI builds
+
+[macOS Release Build](https://github.com/thorstendb-ARM/codex-token-bar/actions/workflows/release-build.yml)
+runs tests and builds release apps for Apple Silicon (`arm64`) and Intel (`x86_64`)
+on pushes to `main`, version tags (`v*`), pull requests and manual runs.
+Download the matching artifact from a successful workflow run and extract the app ZIP.
+Artifacts are retained for 14 days. These builds are ad-hoc signed, not notarized;
+the workflow does not automatically publish GitHub Releases.
+
 For a machine-readable check without opening the menu-bar app:
 
 ```sh
