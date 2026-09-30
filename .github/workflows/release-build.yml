@@ -47,6 +47,12 @@ jobs:
           binary="dist/Codex Token Bar.app/Contents/MacOS/CodexTokenBar"
           lipo "$binary" -verify_arch arm64
           "$binary" --help
+          cmp Sources/TokenBarCore/Resources/prices.json \
+            "dist/Codex Token Bar.app/Contents/Resources/prices.json"
+          smoke_dir="$(mktemp -d)"
+          mkdir -p "$smoke_dir/codex-home"
+          "$binary" --report --codex-home "$smoke_dir/codex-home" \
+            --cache "$smoke_dir/index.json"
 
       - name: Package app
         run: |
