@@ -60,7 +60,8 @@ struct AppConfiguration {
     static let help = """
     Usage: CodexTokenBar [--report] [--codex-home PATH] [--cache PATH]
 
-      --report            Print all four periods as JSON without opening the app.
+      --report            Print all five periods as JSON without opening the app.
+                          Current uses the app's saved manual measurement start.
       --codex-home PATH   Read this Codex home; may be repeated for multiple homes.
                           Defaults to CODEX_HOME, or ~/.codex when unset.
       --cache PATH        Override ~/Library/Caches/CodexTokenBar/index.json.

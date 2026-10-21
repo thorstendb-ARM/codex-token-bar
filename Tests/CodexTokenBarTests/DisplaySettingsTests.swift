@@ -24,6 +24,56 @@ struct DisplaySettingsTests {
         }
     }
 
+    @Test func currentStartsOnceAndSurvivesReloadAcrossCalendarPeriods() throws {
+        try withDefaults { defaults, _ in
+            let startedAt = Date(timeIntervalSince1970: 1_790_000_000)
+            let initial = DisplaySettings(defaults: defaults, now: startedAt)
+            #expect(initial.currentStartedAt == startedAt)
+            #expect(DisplaySettings.storedCurrentStartedAt(defaults: defaults) == startedAt)
+
+            let nextMonth = startedAt.addingTimeInterval(40 * 24 * 60 * 60)
+            let reloaded = DisplaySettings(defaults: defaults, now: nextMonth)
+            #expect(reloaded.currentStartedAt == startedAt)
+            #expect(DisplaySettings.storedCurrentStartedAt(defaults: defaults) == startedAt)
+        }
+    }
+
+    @Test func resetCurrentPersistsLatestStartAndSelectsCurrentWithoutChangingDisplay() throws {
+        try withSettings { settings, defaults in
+            settings.select(.weekly)
+            settings.toggleDollars()
+            let firstReset = settings.currentStartedAt.addingTimeInterval(10)
+            settings.resetCurrent(now: firstReset)
+            #expect(settings.currentStartedAt == firstReset)
+            #expect(settings.selectedPeriod == .current)
+            #expect(settings.showTokens)
+            #expect(!settings.showDollars)
+
+            let latestReset = firstReset.addingTimeInterval(1)
+            settings.resetCurrent(now: latestReset)
+            let reloaded = DisplaySettings(defaults: defaults, now: latestReset.addingTimeInterval(100))
+            #expect(reloaded.currentStartedAt == latestReset)
+            #expect(reloaded.selectedPeriod == .current)
+            #expect(reloaded.showTokens)
+            #expect(!reloaded.showDollars)
+        }
+    }
+
+    @Test func reportReadDoesNotStartMeasurementOrChangeStoredPreferences() throws {
+        try withDefaults { defaults, domain in
+            defaults.set("weekly", forKey: "selectedPeriod")
+            let before = defaults.persistentDomain(forName: domain) ?? [:]
+            #expect(DisplaySettings.storedCurrentStartedAt(defaults: defaults) == nil)
+            #expect(NSDictionary(dictionary: defaults.persistentDomain(forName: domain) ?? [:]).isEqual(to: before))
+
+            let startedAt = Date(timeIntervalSince1970: 1_790_000_000)
+            _ = DisplaySettings(defaults: defaults, now: startedAt)
+            let initialized = defaults.persistentDomain(forName: domain) ?? [:]
+            #expect(DisplaySettings.storedCurrentStartedAt(defaults: defaults) == startedAt)
+            #expect(NSDictionary(dictionary: defaults.persistentDomain(forName: domain) ?? [:]).isEqual(to: initialized))
+        }
+    }
+
     @Test func tokensOnlyPersistsAndCannotBeTurnedOff() throws {
         try withSettings { settings, defaults in
             let dollarsChanged = settings.toggleDollars()
@@ -70,10 +120,11 @@ struct DisplaySettingsTests {
         }
     }
 
-    @Test func fourRowsUseTheSameDisplaySelectionAndExactLabels() throws {
+    @Test func fiveRowsStartWithCurrentAndUseTheSameDisplaySelectionAndExactLabels() throws {
         try withSettings { settings, _ in
-            let labels: [UsagePeriod: String] = [.daily: "D", .weekly: "W", .monthly: "M", .overall: "O"]
-            let menuLabels: [UsagePeriod: String] = [.daily: "Day", .weekly: "Week", .monthly: "Month", .overall: "Overall"]
+            #expect(UsagePeriod.allCases == [.current, .daily, .weekly, .monthly, .overall])
+            let labels: [UsagePeriod: String] = [.current: "C", .daily: "D", .weekly: "W", .monthly: "M", .overall: "O"]
+            let menuLabels: [UsagePeriod: String] = [.current: "Current", .daily: "Day", .weekly: "Week", .monthly: "Month", .overall: "Overall"]
             for period in UsagePeriod.allCases {
                 #expect(settings.title(for: period, totals: fixture(period)) == "\(labels[period]!): 12.3M / $4.56")
                 #expect(settings.title(for: period, totals: fixture(period), expanded: true) == "\(menuLabels[period]!): 12.3M / $4.56")
@@ -121,7 +172,7 @@ struct DisplaySettingsTests {
 
     @Test func menuPlaceholdersUseFullLabelsForEveryDisplaySelection() throws {
         try withSettings { settings, _ in
-            let labels: [UsagePeriod: String] = [.daily: "Day", .weekly: "Week", .monthly: "Month", .overall: "Overall"]
+            let labels: [UsagePeriod: String] = [.current: "Current", .daily: "Day", .weekly: "Week", .monthly: "Month", .overall: "Overall"]
             for period in UsagePeriod.allCases {
                 #expect(settings.placeholderTitle(for: period, hasError: false, expanded: true) == "\(labels[period]!): … / …")
                 #expect(settings.placeholderTitle(for: period, hasError: true, expanded: true) == "\(labels[period]!): — / ?")
@@ -141,11 +192,17 @@ struct DisplaySettingsTests {
     }
 
     private func withSettings(_ body: (inout DisplaySettings, UserDefaults) throws -> Void) throws {
+        try withDefaults { defaults, _ in
+            var settings = DisplaySettings(defaults: defaults, now: Date(timeIntervalSince1970: 1_790_000_000))
+            try body(&settings, defaults)
+        }
+    }
+
+    private func withDefaults(_ body: (UserDefaults, String) throws -> Void) throws {
         let domain = "CodexTokenBarTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
-        var settings = DisplaySettings(defaults: defaults)
-        try body(&settings, defaults)
+        try body(defaults, domain)
     }
 
     private func fixture(_ period: UsagePeriod, unpriced: Bool = false) -> PeriodReport {

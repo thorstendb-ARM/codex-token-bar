@@ -14,15 +14,24 @@ not notarized by Apple.
 The menu bar shows, for example:
 
 ```text
-D: 12.3M / $4.56
+C: 12.3M / $4.56
 ```
 
-Click to select **Day** (today), **Week** (this week, Monday onwards), **Month** (this
-calendar month) or **Overall**. The dropdown shows all four totals; the menu bar
-keeps the compact **D/W/M/O** labels. Check **Tokens** and
+Click to select **Current** (manual measurement), **Day** (today), **Week** (this
+week, Monday onwards), **Month** (this calendar month) or **Overall**. The dropdown
+shows all five totals, with Current first; the menu bar keeps the compact
+**C/D/W/M/O** labels. Check **Tokens** and
 **Dollar** independently to select what is displayed; at least one stays enabled.
 The app remembers these choices. It refreshes every 30 seconds while running.
 There is no Dock icon and no automatic login item.
+
+**Current zurücksetzen** starts a new manual measurement at zero and selects
+Current in the menu bar. Its start time is shown in the menu and tooltip. The first
+measurement starts when the app first opens with this feature; it survives app
+restarts, cache rebuilds and calendar boundaries until you reset it again. Resetting
+Current leaves Day, Week, Month and Overall unchanged. Usage and estimated cost are
+assigned by the timestamp of each recorded token event; a request that spans the
+reset cannot be split into before/after portions.
 
 Periods use the Mac's local time zone. `K`, `M`, `B` and `T` mean thousand, million,
 billion and trillion tokens. Hover for the exact token count, freshness and warnings.
@@ -59,6 +68,10 @@ For a machine-readable check without opening the menu-bar app:
 Optional arguments: `--codex-home PATH` (repeatable), `--cache PATH`, `--help`.
 Otherwise the source is `CODEX_HOME` or `~/.codex`. Finder-launched applications
 usually do not inherit shell environment variables.
+
+The report includes `currentStartedAt` and a `current` total using the app's saved
+measurement start. Before the first app launch, Current is zero and the start is
+omitted. Running `--report` does not start or reset a measurement.
 
 ## Counting and privacy
 
