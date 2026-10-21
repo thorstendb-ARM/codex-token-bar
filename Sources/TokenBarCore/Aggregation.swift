@@ -32,15 +32,21 @@ public struct PeriodTotals: Codable, Sendable {
 
 public enum UsageAggregator {
     public static func summarize(_ snapshot: UsageSnapshot, prices: PriceBook,
-                                 now: Date = Date(), calendar: Calendar = .current)
+                                 now: Date = Date(), calendar: Calendar = .current,
+                                 currentStartedAt: Date? = nil)
         -> [UsagePeriod: PeriodTotals] {
         var result = Dictionary(uniqueKeysWithValues: UsagePeriod.allCases.map { ($0, PeriodTotals()) })
-        let starts = UsagePeriod.allCases.map { ($0, $0.start(now: now, calendar: calendar)) }
+        let starts = UsagePeriod.allCases.map {
+            ($0, $0.start(now: now, calendar: calendar, currentStartedAt: currentStartedAt))
+        }
         // A copied/archived log must not increase the total.
         var seen = Set<String>()
         for event in snapshot.events where event.timestamp <= now && seen.insert(event.id).inserted {
             let cost = prices.estimate(event)
-            for (period, start) in starts where start == nil || event.timestamp >= start! {
+            for (period, start) in starts {
+                // An unstarted manual measurement must not behave like Overall.
+                if period == .current && start == nil { continue }
+                if let start = start, event.timestamp < start { continue }
                 result[period]!.add(event, cost: cost)
             }
         }

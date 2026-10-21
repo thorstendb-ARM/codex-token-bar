@@ -24,6 +24,7 @@ struct PeriodReport: Encodable {
 
 struct UsageReport: Encodable {
     let scannedAt: Date
+    private(set) var currentStartedAt: Date?
     let sources: [String]
     let indexedSessions: Int
     let scannedFiles: Int
@@ -31,9 +32,15 @@ struct UsageReport: Encodable {
     let pricingBasis = "Estimated cost at standard API prices; not account billing."
     let pricingAsOf: String
     let pricingSource: String
-    let periods: [String: PeriodReport]
+    private(set) var periods: [String: PeriodReport]
     let warnings: [String]
     let indexWarningCount: Int
+
+    /// Clear only the manual measurement while waiting for a scan with the new start.
+    mutating func resetCurrent(startedAt: Date) {
+        currentStartedAt = startedAt
+        periods[UsagePeriod.current.rawValue] = PeriodReport(period: .current, totals: PeriodTotals())
+    }
 }
 
 /// Called only on the serial worker queue, or by the command-line entry point.
@@ -46,7 +53,7 @@ final class ReportBuilder {
         self.configuration = configuration
     }
 
-    func scan(progress: ((IndexProgress) -> Void)? = nil) throws -> UsageReport {
+    func scan(currentStartedAt: Date? = nil, progress: ((IndexProgress) -> Void)? = nil) throws -> UsageReport {
         if priceBook == nil {
             priceBook = try PriceBook.bundled()
         }
@@ -54,7 +61,8 @@ final class ReportBuilder {
             throw ConfigurationError.message("Price data is unavailable.")
         }
         let snapshot = try indexer.scan(progress: progress)
-        let totals = UsageAggregator.summarize(snapshot, prices: priceBook)
+        let totals = UsageAggregator.summarize(snapshot, prices: priceBook, now: snapshot.scannedAt,
+                                               currentStartedAt: currentStartedAt)
         var periods: [String: PeriodReport] = [:]
         for period in UsagePeriod.allCases {
             periods[period.rawValue] = PeriodReport(period: period, totals: totals[period] ?? PeriodTotals())
@@ -63,7 +71,8 @@ final class ReportBuilder {
         if let overall = periods[UsagePeriod.overall.rawValue], overall.unpricedEvents > 0 {
             warnings.append("Missing model prices for \(overall.unpricedEvents) events (\(overall.unpricedTokens) tokens); estimated costs are incomplete.")
         }
-        return UsageReport(scannedAt: snapshot.scannedAt, sources: configuration.codexHomes.map(\.path),
+        return UsageReport(scannedAt: snapshot.scannedAt, currentStartedAt: currentStartedAt,
+                           sources: configuration.codexHomes.map(\.path),
                            indexedSessions: snapshot.indexedSessions, scannedFiles: snapshot.scannedFiles,
                            pricingAsOf: priceBook.asOf, pricingSource: priceBook.source,
                            periods: periods, warnings: warnings, indexWarningCount: snapshot.warnings.count)

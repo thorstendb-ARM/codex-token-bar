@@ -10,7 +10,8 @@ enum CodexTokenBarApp {
             if configuration.showHelp {
                 print(AppConfiguration.help)
             } else if configuration.reportOnly {
-                let report = try ReportBuilder(configuration: configuration).scan()
+                let report = try ReportBuilder(configuration: configuration)
+                    .scan(currentStartedAt: DisplaySettings.storedCurrentStartedAt())
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
                 encoder.dateEncodingStrategy = .iso8601

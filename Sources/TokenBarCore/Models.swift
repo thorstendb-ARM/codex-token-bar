@@ -59,10 +59,11 @@ public struct UsageSnapshot: Sendable {
 }
 
 public enum UsagePeriod: String, CaseIterable, Codable, Sendable {
-    case daily, weekly, monthly, overall
+    case current, daily, weekly, monthly, overall
 
     public var title: String {
         switch self {
+        case .current: return "Seit Beginn der manuellen Messung"
         case .daily: return "Heute"
         case .weekly: return "Diese Woche (ab Montag)"
         case .monthly: return "Dieser Monat"
@@ -72,6 +73,7 @@ public enum UsagePeriod: String, CaseIterable, Codable, Sendable {
 
     public var shortTitle: String {
         switch self {
+        case .current: return "C"
         case .daily: return "D"
         case .weekly: return "W"
         case .monthly: return "M"
@@ -81,6 +83,7 @@ public enum UsagePeriod: String, CaseIterable, Codable, Sendable {
 
     public var menuTitle: String {
         switch self {
+        case .current: return "Current"
         case .daily: return "Day"
         case .weekly: return "Week"
         case .monthly: return "Month"
@@ -88,11 +91,13 @@ public enum UsagePeriod: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    public func start(now: Date, calendar: Calendar = .current) -> Date? {
+    public func start(now: Date, calendar: Calendar = .current,
+                      currentStartedAt: Date? = nil) -> Date? {
         var calendar = calendar
         calendar.firstWeekday = 2
         calendar.minimumDaysInFirstWeek = 4
         switch self {
+        case .current: return currentStartedAt
         case .daily: return calendar.startOfDay(for: now)
         case .weekly: return calendar.dateInterval(of: .weekOfYear, for: now)?.start
         case .monthly: return calendar.dateInterval(of: .month, for: now)?.start

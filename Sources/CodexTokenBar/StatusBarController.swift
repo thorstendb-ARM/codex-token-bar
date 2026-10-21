@@ -9,6 +9,8 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
     private var periodItems: [UsagePeriod: NSMenuItem] = [:]
     private let messageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let refreshItem = NSMenuItem(title: "Aktualisieren", action: #selector(refresh), keyEquivalent: "r")
+    private let resetCurrentItem = NSMenuItem(title: "Current zurücksetzen", action: #selector(resetCurrent), keyEquivalent: "")
+    private let currentStartedItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let tokensItem = NSMenuItem(title: "Tokens", action: #selector(toggleTokens), keyEquivalent: "")
     private let dollarsItem = NSMenuItem(title: "Dollar", action: #selector(toggleDollars), keyEquivalent: "")
     private var timer: Timer?
@@ -41,6 +43,11 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
             menu.addItem(item)
             periodItems[period] = item
         }
+        menu.addItem(.separator())
+        currentStartedItem.isEnabled = false
+        menu.addItem(currentStartedItem)
+        resetCurrentItem.target = self
+        menu.addItem(resetCurrentItem)
         menu.addItem(.separator())
         tokensItem.target = self
         dollarsItem.target = self
@@ -87,18 +94,26 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
         updateDisplay()
     }
 
+    @objc private func resetCurrent() {
+        settings.resetCurrent()
+        report?.resetCurrent(startedAt: settings.currentStartedAt)
+        updateDisplay()
+        refresh()
+    }
+
     @objc private func refresh() {
         guard !isScanning else { return }
         isScanning = true
         scanProgress = nil
         lastProgressUpdate = .distantPast
+        let currentStartedAt = settings.currentStartedAt
         updateDisplay()
 
         worker.async { [weak self] in
             guard let self else { return }
             let result: Result<UsageReport, Error>
             do {
-                let report = try self.builder.scan { [weak self] progress in
+                let report = try self.builder.scan(currentStartedAt: currentStartedAt) { [weak self] progress in
                     DispatchQueue.main.async { self?.updateProgress(progress) }
                 }
                 result = .success(report)
@@ -109,14 +124,18 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.isScanning = false
                 self.scanProgress = nil
+                let wasReset = currentStartedAt != self.settings.currentStartedAt
                 switch result {
-                case .success(let report):
+                case .success(var report):
+                    if wasReset { report.resetCurrent(startedAt: self.settings.currentStartedAt) }
                     self.report = report
                     self.errorMessage = nil
                 case .failure(let error):
                     self.errorMessage = error.localizedDescription
                 }
                 self.updateDisplay()
+                // A reset during scanning needs a fresh snapshot, even if that scan failed.
+                if wasReset { self.refresh() }
             }
         }
     }
@@ -133,11 +152,12 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
 
     private func updateDisplay() {
         let hasIndexWarnings = (report?.indexWarningCount ?? 0) > 0
+        let currentStart = settings.currentStartedAt.formatted(date: .abbreviated, time: .standard)
         for period in UsagePeriod.allCases {
             let item = periodItems[period]
             item?.title = periodTitle(period, expanded: true)
             item?.state = period == settings.selectedPeriod ? .on : .off
-            item?.toolTip = period.title
+            item?.toolTip = period == .current ? "\(period.title) · Seit: \(currentStart)" : period.title
         }
 
         var title = periodTitle(settings.selectedPeriod)
@@ -145,6 +165,8 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
         statusItem?.button?.title = title
         statusItem?.button?.toolTip = tooltip()
         refreshItem.isEnabled = !isScanning
+        currentStartedItem.title = "Current seit: \(currentStart)"
+        resetCurrentItem.toolTip = "Startet eine neue manuelle Messung bei null und zeigt Current in der Menüleiste."
         tokensItem.state = settings.showTokens ? .on : .off
         dollarsItem.state = settings.showDollars ? .on : .off
         tokensItem.isEnabled = settings.canToggleTokens
@@ -182,6 +204,9 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
     private func tooltip() -> String {
         var lines = ["Codex Token Usage · \(settings.selectedPeriod.title)",
                      "Kosten: USD-Schätzung mit API-Standardpreisen; keine Abrechnung."]
+        if settings.selectedPeriod == .current {
+            lines.append("Messung seit: \(settings.currentStartedAt.formatted(date: .abbreviated, time: .standard))")
+        }
         if let period = report?.periods[settings.selectedPeriod.rawValue] {
             lines.append("\(period.totalTokens) Tokens")
             if period.unpricedEvents > 0 {
