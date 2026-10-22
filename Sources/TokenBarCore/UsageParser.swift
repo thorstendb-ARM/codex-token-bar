@@ -17,7 +17,7 @@ struct UsageParserState: Codable {
     var lastOnlyFingerprints: Set<String> = []
 }
 
-struct IndexedUsageEvent: Codable {
+struct IndexedUsageEvent: Codable, Equatable {
     var fingerprint: String
     var timestamp: Date
     var model: String?
@@ -30,11 +30,64 @@ enum UsageReadError: Error {
     case invalidCacheLocation
 }
 
-enum UsageParser {
-    private struct Header: Decodable { let type: String? }
-    private struct Envelope<P: Decodable>: Decodable {
-        let timestamp: String?
-        let payload: P
+// Each indexer owns a parser and serializes its use along with the parser state.
+final class UsageParser {
+    private let decoder = JSONDecoder()
+    private let fractionalDateFormatter: ISO8601DateFormatter
+    private let dateFormatter: ISO8601DateFormatter
+    private static let skipMetadataKey = CodingUserInfoKey(rawValue: "skipMetadata")!
+
+    init() {
+        fractionalDateFormatter = ISO8601DateFormatter()
+        fractionalDateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime]
+    }
+
+    // Dispatch inside Decodable so Foundation parses the JSON only once. Unknown
+    // fields remain undecoded, including conversation text and instructions.
+    private enum Record: Decodable {
+        case ignored
+        case metadata(String?, Metadata)
+        case context(Context)
+        case settings(SettingsMarker)
+        case task(TaskMarker)
+        case tokens(String?, TokenPayload)
+
+        private enum Keys: String, CodingKey { case type, timestamp, payload }
+        private enum EventKeys: String, CodingKey { case type }
+
+        init(from decoder: Decoder) throws {
+            let record = try decoder.container(keyedBy: Keys.self)
+            switch try record.decodeIfPresent(String.self, forKey: .type) {
+            case "session_meta":
+                // Inherited parent metadata is ignored, including its payload.
+                guard decoder.userInfo[skipMetadataKey] as? Bool != true else {
+                    self = .ignored
+                    return
+                }
+                let timestamp = try record.decodeIfPresent(String.self, forKey: .timestamp)
+                self = .metadata(timestamp, try record.decode(Metadata.self, forKey: .payload))
+            case "turn_context":
+                _ = try record.decodeIfPresent(String.self, forKey: .timestamp)
+                self = .context(try record.decode(Context.self, forKey: .payload))
+            case "event_msg":
+                let timestamp = try record.decodeIfPresent(String.self, forKey: .timestamp)
+                let event = try record.nestedContainer(keyedBy: EventKeys.self, forKey: .payload)
+                switch try event.decodeIfPresent(String.self, forKey: .type) {
+                case "thread_settings_applied":
+                    self = .settings(try record.decode(SettingsMarker.self, forKey: .payload))
+                case "task_started":
+                    self = .task(try record.decode(TaskMarker.self, forKey: .payload))
+                case "token_count":
+                    self = .tokens(timestamp, try record.decode(TokenPayload.self, forKey: .payload))
+                default:
+                    self = .ignored
+                }
+            default:
+                self = .ignored
+            }
+        }
     }
     private struct Metadata: Decodable {
         let id: String?
@@ -45,14 +98,12 @@ enum UsageParser {
         let model: String?
     }
     private struct Context: Decodable { let model: String? }
-    private struct EventHeader: Decodable { let type: String? }
     private struct SettingsMarker: Decodable {
         let thread_id: String?
         let thread_settings: Context?
     }
     private struct TaskMarker: Decodable { let started_at: Double? }
     private struct TokenPayload: Decodable {
-        let type: String?
         let model: String?
         let info: TokenInfo?
     }
@@ -83,61 +134,49 @@ enum UsageParser {
         }
     }
 
-    static func parse(_ line: Data, state: inout UsageParserState) throws -> IndexedUsageEvent? {
+    func parse(_ line: Data, state: inout UsageParserState) throws -> IndexedUsageEvent? {
         if line.allSatisfy({ $0 == 13 || $0 == 32 || $0 == 9 }) { return nil }
-        let decoder = JSONDecoder()
+        decoder.userInfo[Self.skipMetadataKey] = state.hasMetadata
         do {
-            let header = try decoder.decode(Header.self, from: line)
-            switch header.type {
-            case "session_meta":
-                guard !state.hasMetadata else { return nil }
-                let record = try decoder.decode(Envelope<Metadata>.self, from: line)
-                let metadata = record.payload
+            switch try decoder.decode(Record.self, from: line) {
+            case .metadata(let timestamp, let metadata):
                 state.hasMetadata = true
                 state.sessionID = identifier(metadata.id) ?? identifier(metadata.session_id) ?? state.sessionID
                 state.forkedFromID = identifier(metadata.forked_from_id) ?? state.forkedFromID
-                state.createdAt = (metadata.timestamp ?? record.timestamp).flatMap(date)
+                state.createdAt = (metadata.timestamp ?? timestamp).flatMap(date)
                 state.hasInheritedHistory = state.forkedFromID != nil || metadata.subagent_history_start_ordinal != nil
                 state.ownHistoryStarted = !state.hasInheritedHistory
                 state.model = identifier(metadata.model) ?? state.model
                 return nil
-            case "turn_context":
-                let record = try decoder.decode(Envelope<Context>.self, from: line)
-                state.model = identifier(record.payload.model) ?? state.model
+            case .context(let context):
+                state.model = identifier(context.model) ?? state.model
                 return nil
-            case "event_msg":
-                let event = try decoder.decode(Envelope<EventHeader>.self, from: line)
-                if event.payload.type == "thread_settings_applied" {
-                    let marker = try decoder.decode(Envelope<SettingsMarker>.self, from: line)
-                    if let id = marker.payload.thread_id, id == state.sessionID {
-                        if !state.ownHistoryStarted { state.model = nil }
-                        state.ownHistoryStarted = true
-                        state.model = identifier(marker.payload.thread_settings?.model) ?? state.model
-                    }
-                    return nil
+            case .settings(let marker):
+                if let id = marker.thread_id, id == state.sessionID {
+                    if !state.ownHistoryStarted { state.model = nil }
+                    state.ownHistoryStarted = true
+                    state.model = identifier(marker.thread_settings?.model) ?? state.model
                 }
-                if event.payload.type == "task_started" {
-                    let marker = try decoder.decode(Envelope<TaskMarker>.self, from: line)
-                    // Older logs use integer Unix seconds even though metadata has fractions.
-                    // Ordinals in migrated histories may point at EOF, so never blindly skip them.
-                    if let started = marker.payload.started_at, let created = state.createdAt,
-                       started >= floor(created.timeIntervalSince1970) {
-                        if !state.ownHistoryStarted { state.model = nil }
-                        state.ownHistoryStarted = true
-                    }
-                    return nil
+                return nil
+            case .task(let marker):
+                // Older logs use integer Unix seconds even though metadata has fractions.
+                // Ordinals in migrated histories may point at EOF, so never blindly skip them.
+                if let started = marker.started_at, let created = state.createdAt,
+                   started >= floor(created.timeIntervalSince1970) {
+                    if !state.ownHistoryStarted { state.model = nil }
+                    state.ownHistoryStarted = true
                 }
-                guard event.payload.type == "token_count" else { return nil }
-                let record = try decoder.decode(Envelope<TokenPayload>.self, from: line)
-                guard let info = record.payload.info else { return nil }
+                return nil
+            case .tokens(let timestampText, let payload):
+                guard let info = payload.info else { return nil }
                 guard let rawUsage = info.total_token_usage ?? info.last_token_usage else { return nil }
-                guard let timestampText = record.timestamp, let timestamp = date(timestampText) else {
+                guard let timestampText, let timestamp = date(timestampText) else {
                     throw UsageReadError.malformedRecord
                 }
                 let current = try rawUsage.usage()
                 let last = try info.last_token_usage?.usage()
                 let hasTotal = info.total_token_usage != nil
-                let snapshot = values(current).map(String.init).joined(separator: ",")
+                let snapshot = Self.values(current).map(String.init).joined(separator: ",")
                 let fingerprint = usageDigest("\(timestamp.timeIntervalSince1970)|\(hasTotal ? "total" : "last")|\(snapshot)")
                 if !hasTotal && !state.lastOnlyFingerprints.insert(fingerprint).inserted { return nil }
                 var delta = current
@@ -169,15 +208,15 @@ enum UsageParser {
                 }
                 if !hasTotal { state.pendingLastOnly = add(state.pendingLastOnly, current) }
                 if hasTotal { state.previousTotal = current }
-                let model = identifier(info.model) ?? identifier(record.payload.model) ?? state.model
+                let model = identifier(info.model) ?? identifier(payload.model) ?? state.model
                 if let model { state.model = model }
                 guard state.ownHistoryStarted else {
                     state.inheritedTokenRecords += 1
                     return nil
                 }
-                guard values(delta).contains(where: { $0 > 0 }) else { return nil }
+                guard Self.values(delta).contains(where: { $0 > 0 }) else { return nil }
                 return IndexedUsageEvent(fingerprint: fingerprint, timestamp: timestamp, model: model, usage: delta)
-            default:
+            case .ignored:
                 return nil
             }
         } catch {
@@ -186,7 +225,7 @@ enum UsageParser {
         }
     }
 
-    private static func identifier(_ value: String?) -> String? {
+    private func identifier(_ value: String?) -> String? {
         guard let value, !value.isEmpty, value.utf8.count <= 256,
               value.unicodeScalars.allSatisfy({
                   CharacterSet.alphanumerics.contains($0) || "-_.:/".unicodeScalars.contains($0)
@@ -194,21 +233,17 @@ enum UsageParser {
         return value
     }
 
-    private static func date(_ text: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let result = formatter.date(from: text) { return result }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: text)
+    private func date(_ text: String) -> Date? {
+        fractionalDateFormatter.date(from: text) ?? dateFormatter.date(from: text)
     }
 
-    private static func subtract(_ a: TokenUsage, _ b: TokenUsage) -> TokenUsage {
+    private func subtract(_ a: TokenUsage, _ b: TokenUsage) -> TokenUsage {
         TokenUsage(input: max(0, a.input - b.input), cachedInput: max(0, a.cachedInput - b.cachedInput),
                    cacheWrite: max(0, a.cacheWrite - b.cacheWrite), output: max(0, a.output - b.output),
                    reasoningOutput: max(0, a.reasoningOutput - b.reasoningOutput), total: max(0, a.total - b.total))
     }
 
-    private static func add(_ a: TokenUsage, _ b: TokenUsage) -> TokenUsage {
+    private func add(_ a: TokenUsage, _ b: TokenUsage) -> TokenUsage {
         func sum(_ a: Int64, _ b: Int64) -> Int64 {
             let result = a.addingReportingOverflow(b)
             return result.overflow ? Int64.max : result.partialValue
@@ -225,6 +260,14 @@ enum UsageParser {
 
 func usageDigest(_ value: String) -> String { usageDigest(Data(value.utf8)) }
 
+private let hexadecimalDigits = Array("0123456789abcdef".utf8)
+
 func usageDigest(_ value: Data) -> String {
-    SHA256.hash(data: value).map { String(format: "%02x", $0) }.joined()
+    var hex: [UInt8] = []
+    hex.reserveCapacity(64)
+    for byte in SHA256.hash(data: value) {
+        hex.append(hexadecimalDigits[Int(byte >> 4)])
+        hex.append(hexadecimalDigits[Int(byte & 0x0f)])
+    }
+    return String(decoding: hex, as: UTF8.self)
 }

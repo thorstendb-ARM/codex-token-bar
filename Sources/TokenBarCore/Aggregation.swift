@@ -41,8 +41,9 @@ public enum UsageAggregator {
         }
         // A copied/archived log must not increase the total.
         var seen = Set<String>()
+        var cachedModels: [String: PriceBook.Model?] = [:]
         for event in snapshot.events where event.timestamp <= now && seen.insert(event.id).inserted {
-            let cost = prices.estimate(event)
+            let cost = prices.estimate(event, cachedModels: &cachedModels)
             for (period, start) in starts {
                 // An unstarted manual measurement must not behave like Overall.
                 if period == .current && start == nil { continue }

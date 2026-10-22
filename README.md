@@ -22,7 +22,8 @@ week, Monday onwards), **Month** (this calendar month) or **Overall**. The dropd
 shows all five totals, with Current first; the menu bar keeps the compact
 **C/D/W/M/O** labels. Check **Tokens** and
 **Dollar** independently to select what is displayed; at least one stays enabled.
-The app remembers these choices. It refreshes every 30 seconds while running.
+The app remembers these choices. It refreshes every 30 seconds while running
+(with up to 3 seconds of timer tolerance to reduce wakeups).
 There is no Dock icon and no automatic login item.
 
 **Current zurücksetzen** starts a new manual measurement at zero and selects
@@ -45,6 +46,16 @@ bash scripts/test.sh
 bash scripts/build-app.sh
 open "dist/Codex Token Bar.app"
 ```
+
+For a repeatable CPU/wall-time benchmark using only temporary synthetic sessions:
+
+```sh
+bash scripts/benchmark.sh                  # 2,000 sessions, 100 events each
+bash scripts/benchmark.sh --source /path/to/older/checkout
+```
+
+It measures the initial scan, unchanged refreshes and a single-file append,
+checks token totals, then removes its temporary data.
 
 The build is signed locally (ad-hoc), not notarized for public distribution. The
 resulting `.app` can be moved to `~/Applications` manually.
@@ -80,12 +91,23 @@ omitted. Running `--report` does not start or reset a measurement.
   is part of input; reasoning is part of output. Neither is added twice.
 - Normalizes cumulative counters and ignores repeated snapshots. Separate agent
   sessions contribute their own usage; inherited fork history must not be billed again.
-- Maintains an incremental cache at `~/Library/Caches/CodexTokenBar/index.json`.
-  It stores usage/model/time and file metadata, not messages or credentials.
-- The first scan of a large history takes longer. Subsequent scans read appended data.
-  An unchanged cache is not rewritten. Errors remain visible and are retried.
+- Maintains an incremental cache at `~/Library/Caches/CodexTokenBar/index.json`,
+  with one record per source file in `index.json.records` and a process lock at
+  `index.json.lock`. It stores usage/model/time and file metadata, not messages
+  or credentials. Existing version 2 caches migrate automatically.
+- The first scan of a large history takes longer. Subsequent scans check file
+  metadata and read only changed files. Unchanged events and period totals are
+  reused; new data rewrites only the affected cache records and small manifest.
+  Errors remain visible and are retried.
   Individual JSONL records are bounded at 16 MiB; skipped records are reported.
   Codex's files are never modified.
+- Replaced cache records are deleted after a successful atomic commit. Startup
+  removes orphaned files from interrupted writes; old generations do not accumulate.
+  Missing source files retain their cached history for seven days, then their
+  records are deleted and their usage leaves the totals. Discovery failures defer
+  this cleanup. Cache size follows the retained local history. To discard the
+  entire cache, quit the app and delete `~/Library/Caches/CodexTokenBar`; the next
+  launch rebuilds it. This does not reset the Current measurement start.
 - Overall means the history available locally. Deleted or never-recorded sessions,
   other computers, ChatGPT usage and unreported backend usage cannot be reconstructed.
 

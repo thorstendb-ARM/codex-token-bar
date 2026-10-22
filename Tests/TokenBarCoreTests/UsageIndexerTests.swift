@@ -51,7 +51,7 @@ final class UsageIndexerTests {
             #"{"type":"event_msg","payload":{"type":"token_count","info":null}}"#])
         let snapshot = try indexer().scan()
         #expect(snapshot.events.map(\.usage.total) == [12])
-        let cache = try String(contentsOf: cacheURL)
+        let cache = try cachedText()
         #expect(!(cache.contains("NEVER_STORE_THIS_PROMPT")))
         #expect(!(cache.contains("content")))
     }
@@ -116,16 +116,12 @@ final class UsageIndexerTests {
         let original = try indexer().scan()
         var oldCache = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: cacheURL)) as? [String: Any])
         oldCache["version"] = 1
-        var files = try #require(oldCache["files"] as? [String: [String: Any]])
-        let path = try #require(files.keys.first)
-        files[path]?["events"] = []
-        oldCache["files"] = files
         try JSONSerialization.data(withJSONObject: oldCache).write(to: cacheURL)
         let rebuilt = try indexer().scan()
         #expect(rebuilt.events == original.events)
         #expect(rebuilt.warnings.contains { $0.contains("neu indexiert") })
         let current = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: cacheURL)) as? [String: Any])
-        #expect(current["version"] as? Int == 2)
+        #expect(current["version"] as? Int == 3)
     }
 
     @Test func testPartialEOFIsRereadWithoutDoubleCounting() throws {
@@ -136,8 +132,117 @@ final class UsageIndexerTests {
         let split = next.index(next.startIndex, offsetBy: next.count / 2)
         try append(String(next[..<split]), to: file)
         #expect(try scanner.scan().events.map(\.usage.total) == [120])
+        _ = try scanner.scan()
+        #expect(scanner.lastScanStatistics.filesRead == 0)
+        #expect(scanner.lastScanStatistics.bytesRead == 0)
         try append(String(next[split...]) + "\n", to: file)
         #expect(try scanner.scan().events.map(\.usage.total) == [120, 60])
+    }
+
+    @Test func testIdleScansReadNoContentAndReuseEvents() throws {
+        let file = try write("one", lines: [meta("one"), token(100, 20)])
+        try write("two", lines: [meta("two"), token(40, 10)])
+        let scanner = indexer()
+        let initial = try scanner.scan()
+        let idle = try scanner.scan()
+        #expect(idle.events == initial.events)
+        #expect(idle.eventsRevision == initial.eventsRevision)
+        #expect(scanner.lastScanStatistics.filesRead == 0)
+        #expect(scanner.lastScanStatistics.bytesRead == 0)
+        #expect(scanner.lastScanStatistics.eventIDsGenerated == 0)
+        #expect(scanner.lastScanStatistics.aggregationRebuilds == 0)
+
+        try append(token(150, 30, second: 1) + "\n", to: file)
+        let changed = try scanner.scan()
+        #expect(changed.eventsRevision != initial.eventsRevision)
+        #expect(changed.events.count == 3)
+        #expect(scanner.lastScanStatistics.filesRead == 1)
+        #expect(scanner.lastScanStatistics.eventIDsGenerated == 2)
+        #expect(try indexer().scan().events == changed.events)
+
+        try append(context("next-model") + "\n", to: file)
+        #expect(try scanner.scan().eventsRevision == changed.eventsRevision)
+        #expect(scanner.lastScanStatistics.aggregationRebuilds == 0)
+        #expect(scanner.lastScanStatistics.eventIDsGenerated == 0)
+    }
+
+    @Test func testSameSizeRewriteWithRestoredModificationDateIsDetected() throws {
+        let file = try write("one", lines: [meta("one"), token(100, 20)])
+        let scanner = indexer()
+        let original = try scanner.scan()
+        let modified = try #require(FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+        try write("one", lines: [meta("one"), token(200, 40)])
+        try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: file.path)
+        let rewritten = try scanner.scan()
+        #expect(rewritten.events.map(\.usage.total) == [240])
+        #expect(rewritten.eventsRevision != original.eventsRevision)
+        #expect(scanner.lastScanStatistics.filesRead == 1)
+    }
+
+    @Test func testLegacyTimestampMigrationReusesCursorWithoutRereadingHistory() throws {
+        let large = #"{"type":"response_item","payload":{"content":""# + String(repeating: "x", count: 100_000) + #""}}"#
+        let file = try write("one", lines: [meta("one"), large, token(100, 20)])
+        let initial = try indexer().scan()
+        let manifest = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: cacheURL)) as? [String: Any])
+        let files = try #require(manifest["files"] as? [String: String])
+        let recordURL = URL(fileURLWithPath: cacheURL.path + ".records").appendingPathComponent(try #require(files[file.path]))
+        var record = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: recordURL)) as? [String: Any])
+        record.removeValue(forKey: "changed")
+        let modified = try #require(FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+        record["modified"] = modified.timeIntervalSinceReferenceDate
+        try JSONSerialization.data(withJSONObject: ["version": 2, "files": [file.path: record]]).write(to: cacheURL)
+        let scanner = indexer()
+        #expect(try scanner.scan().events == initial.events)
+        #expect(scanner.lastScanStatistics.bytesRead < 16_384)
+        #expect(try indexer().scan().events == initial.events)
+    }
+
+    @Test func testReappearingSourceStartsNewRetentionWindow() throws {
+        let file = try write("one", lines: [meta("one"), token(100, 20)])
+        let away = directory.appendingPathComponent("away.jsonl")
+        let now = Date()
+        let scanner = indexer()
+        let initial = try scanner.scan(now: now)
+        try FileManager.default.moveItem(at: file, to: away)
+        _ = try scanner.scan(now: now.addingTimeInterval(1))
+        try FileManager.default.moveItem(at: away, to: file)
+        _ = try scanner.scan(now: now.addingTimeInterval(UsageIndexer.missingFileRetention - 1))
+        try FileManager.default.moveItem(at: file, to: away)
+        let restarted = indexer()
+        _ = try restarted.scan(now: now.addingTimeInterval(UsageIndexer.missingFileRetention))
+        #expect(try restarted.scan(now: now.addingTimeInterval(UsageIndexer.missingFileRetention + 10)).events == initial.events)
+        #expect(try restarted.scan(now: now.addingTimeInterval(2 * UsageIndexer.missingFileRetention + 1)).events.isEmpty)
+    }
+
+    @Test func testCopiedEventsCanEnrichModelWithoutAddingTokens() throws {
+        try write("original", lines: [meta("shared-session"), token(100, 20)])
+        let scanner = indexer()
+        let initial = try scanner.scan()
+        #expect(initial.events.first?.model == nil)
+        try write("copy", lines: [meta("shared-session", model: "gpt-test"), token(100, 20)])
+        let enriched = try scanner.scan()
+        #expect(enriched.events.map(\.usage.total) == [120])
+        #expect(enriched.events.first?.model == "gpt-test")
+        #expect(enriched.eventsRevision != initial.eventsRevision)
+        #expect(try indexer().scan().events == enriched.events)
+    }
+
+    @Test func testMissingSourcesExpireAndTheirCacheFilesAreDeleted() throws {
+        let file = try write("one", lines: [meta("one"), token(100, 20)])
+        let scanner = indexer()
+        let now = Date()
+        let initial = try scanner.scan(now: now)
+        try FileManager.default.removeItem(at: file)
+        let missing = try scanner.scan(now: now.addingTimeInterval(1))
+        #expect(missing.events == initial.events)
+        let restarted = indexer()
+        #expect(try restarted.scan(now: now.addingTimeInterval(60)).events == initial.events)
+        let expired = try restarted.scan(now: now.addingTimeInterval(UsageIndexer.missingFileRetention + 2))
+        #expect(expired.events.isEmpty)
+        #expect(expired.indexedSessions == 0)
+        let records = URL(fileURLWithPath: cacheURL.path + ".records")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: records.path).isEmpty)
+        #expect(try indexer().scan().events.isEmpty)
     }
 
     @Test func testTruncationAndAtomicReplacementRescan() throws {
@@ -284,7 +389,7 @@ final class UsageIndexerTests {
         let result = try indexer().scan()
         #expect(result.events.map(\.usage.total) == [12])
         #expect(!(result.warnings.isEmpty))
-        #expect(try Data(contentsOf: cacheURL).count < 10_000)
+        #expect(try cachedText().utf8.count < 10_000)
     }
 
     @Test func testLargeValidConversationLineBelowLimitIsParsedWithoutWarning() throws {
@@ -293,10 +398,16 @@ final class UsageIndexerTests {
         let result = try indexer().scan()
         #expect(result.events.map(\.usage.total) == [12])
         #expect(result.warnings.isEmpty)
-        #expect(try Data(contentsOf: cacheURL).count < 10_000)
+        #expect(try cachedText().utf8.count < 10_000)
     }
 
     private func indexer() -> UsageIndexer { UsageIndexer(codexHomes: [home], cacheURL: cacheURL) }
+
+    private func cachedText() throws -> String {
+        let records = URL(fileURLWithPath: cacheURL.path + ".records")
+        let urls = try FileManager.default.contentsOfDirectory(at: records, includingPropertiesForKeys: nil)
+        return try ([cacheURL] + urls).map { try String(contentsOf: $0) }.joined()
+    }
 
     @discardableResult
     private func write(_ name: String, lines: [String]) throws -> URL {

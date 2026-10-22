@@ -47,26 +47,21 @@ struct UsageReport: Encodable {
 final class ReportBuilder {
     private let configuration: AppConfiguration
     private lazy var indexer = UsageIndexer(codexHomes: configuration.codexHomes, cacheURL: configuration.cacheURL)
-    private var priceBook: PriceBook?
+    private var periodCache: PeriodReportCache?
 
     init(configuration: AppConfiguration) {
         self.configuration = configuration
     }
 
     func scan(currentStartedAt: Date? = nil, progress: ((IndexProgress) -> Void)? = nil) throws -> UsageReport {
-        if priceBook == nil {
-            priceBook = try PriceBook.bundled()
+        if periodCache == nil {
+            periodCache = PeriodReportCache(prices: try PriceBook.bundled())
         }
-        guard let priceBook else {
+        guard let periodCache else {
             throw ConfigurationError.message("Price data is unavailable.")
         }
         let snapshot = try indexer.scan(progress: progress)
-        let totals = UsageAggregator.summarize(snapshot, prices: priceBook, now: snapshot.scannedAt,
-                                               currentStartedAt: currentStartedAt)
-        var periods: [String: PeriodReport] = [:]
-        for period in UsagePeriod.allCases {
-            periods[period.rawValue] = PeriodReport(period: period, totals: totals[period] ?? PeriodTotals())
-        }
+        let periods = periodCache.reports(for: snapshot, currentStartedAt: currentStartedAt)
         var warnings = snapshot.warnings
         if let overall = periods[UsagePeriod.overall.rawValue], overall.unpricedEvents > 0 {
             warnings.append("Missing model prices for \(overall.unpricedEvents) events (\(overall.unpricedTokens) tokens); estimated costs are incomplete.")
@@ -74,8 +69,51 @@ final class ReportBuilder {
         return UsageReport(scannedAt: snapshot.scannedAt, currentStartedAt: currentStartedAt,
                            sources: configuration.codexHomes.map(\.path),
                            indexedSessions: snapshot.indexedSessions, scannedFiles: snapshot.scannedFiles,
-                           pricingAsOf: priceBook.asOf, pricingSource: priceBook.source,
+                           pricingAsOf: periodCache.prices.asOf, pricingSource: periodCache.prices.source,
                            periods: periods, warnings: warnings, indexWarningCount: snapshot.warnings.count)
+    }
+}
+
+/// A stable index revision needs no history traversal until a reporting boundary changes.
+final class PeriodReportCache {
+    let prices: PriceBook
+    private struct Key: Equatable {
+        let revision: UInt64
+        let starts: [Date?]
+    }
+    private var key: Key?
+    private var periods: [String: PeriodReport] = [:]
+    private var validFrom = Date.distantFuture
+    private var nextFutureEvent: Date?
+
+    init(prices: PriceBook) {
+        self.prices = prices
+    }
+
+    func reports(for snapshot: UsageSnapshot, currentStartedAt: Date? = nil,
+                 calendar: Calendar = .current) -> [String: PeriodReport] {
+        let now = snapshot.scannedAt
+        let nextKey = snapshot.eventsRevision.map { revision in
+            Key(revision: revision, starts: UsagePeriod.allCases.map {
+                $0.start(now: now, calendar: calendar, currentStartedAt: currentStartedAt)
+            })
+        }
+        if let nextKey, nextKey == key, now >= validFrom,
+           nextFutureEvent.map({ now < $0 }) ?? true {
+            return periods
+        }
+
+        let totals = UsageAggregator.summarize(snapshot, prices: prices, now: now,
+                                               calendar: calendar, currentStartedAt: currentStartedAt)
+        periods = Dictionary(uniqueKeysWithValues: UsagePeriod.allCases.map {
+            ($0.rawValue, PeriodReport(period: $0, totals: totals[$0] ?? PeriodTotals()))
+        })
+        key = nextKey
+        validFrom = now
+        // Future-dated records become eligible without any file changing; clock rollback
+        // and day/week/month/current changes must also invalidate the cached totals.
+        nextFutureEvent = snapshot.events.lazy.map(\.timestamp).filter { $0 > now }.min()
+        return periods
     }
 }
 

@@ -33,6 +33,26 @@ public struct PriceBook: Codable, Sendable {
 
     public func estimate(_ event: UsageEvent) -> Double? {
         guard let name = event.model, let model = model(named: name) else { return nil }
+        return estimate(event, model: model)
+    }
+
+    /// Resolve each distinct model only once during a history summary, including
+    /// unknown proxy names that would otherwise repeat the snapshot-name regex.
+    func estimate(_ event: UsageEvent, cachedModels: inout [String: Model?]) -> Double? {
+        guard let name = event.model else { return nil }
+        let resolved: Model?
+        if let cached = cachedModels[name] {
+            resolved = cached
+        } else {
+            resolved = model(named: name)
+            // updateValue retains a cached nil instead of removing the dictionary entry.
+            cachedModels.updateValue(resolved, forKey: name)
+        }
+        guard let resolved else { return nil }
+        return estimate(event, model: resolved)
+    }
+
+    private func estimate(_ event: UsageEvent, model: Model) -> Double? {
         let usage = event.usage
         guard usage.input >= 0, usage.output >= 0, usage.cachedInput >= 0,
               usage.cacheWrite >= 0, usage.cachedInput <= usage.input,

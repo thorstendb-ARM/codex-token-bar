@@ -18,7 +18,6 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
     private var errorMessage: String?
     private var isScanning = false
     private var scanProgress: IndexProgress?
-    private var lastProgressUpdate = Date.distantPast
     private var settings = DisplaySettings()
 
     init(configuration: AppConfiguration) {
@@ -69,6 +68,7 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
         let refreshTimer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
             self?.refresh()
         }
+        refreshTimer.tolerance = 3
         timer = refreshTimer
         RunLoop.main.add(refreshTimer, forMode: .common)
     }
@@ -105,17 +105,25 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
         guard !isScanning else { return }
         isScanning = true
         scanProgress = nil
-        lastProgressUpdate = .distantPast
+        let showProgress = report == nil
         let currentStartedAt = settings.currentStartedAt
-        updateDisplay()
+        refreshItem.isEnabled = false
+        updateMessage()
 
         worker.async { [weak self] in
             guard let self else { return }
             let result: Result<UsageReport, Error>
             do {
-                let report = try self.builder.scan(currentStartedAt: currentStartedAt) { [weak self] progress in
+                var lastProgressTime = -Double.infinity
+                let progress: ((IndexProgress) -> Void)? = showProgress ? { [weak self] progress in
+                    let now = ProcessInfo.processInfo.systemUptime
+                    // Throttle before dispatching: large histories must not queue one
+                    // main-thread callback per file. Warm scans need no progress events.
+                    guard now - lastProgressTime >= 0.2 || progress.completed == progress.total else { return }
+                    lastProgressTime = now
                     DispatchQueue.main.async { self?.updateProgress(progress) }
-                }
+                } : nil
+                let report = try self.builder.scan(currentStartedAt: currentStartedAt, progress: progress)
                 result = .success(report)
             } catch {
                 result = .failure(error)
@@ -143,11 +151,7 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
     private func updateProgress(_ progress: IndexProgress) {
         guard isScanning else { return }
         scanProgress = progress
-        let now = Date()
-        if now.timeIntervalSince(lastProgressUpdate) >= 0.2 || progress.completed == progress.total {
-            lastProgressUpdate = now
-            updateDisplay()
-        }
+        updateMessage()
     }
 
     private func updateDisplay() {
@@ -172,6 +176,10 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
         tokensItem.isEnabled = settings.canToggleTokens
         dollarsItem.isEnabled = settings.canToggleDollars
 
+        updateMessage()
+    }
+
+    private func updateMessage() {
         if let errorMessage {
             messageItem.title = "Fehler: \(singleLine(errorMessage))"
             messageItem.toolTip = errorMessage

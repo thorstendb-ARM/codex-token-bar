@@ -47,14 +47,17 @@ public struct UsageSnapshot: Sendable {
     public var scannedFiles: Int
     public var warnings: [String]
     public var scannedAt: Date
+    /// Stable for unchanged events within one indexer; nil for external snapshots.
+    public var eventsRevision: UInt64?
 
     public init(events: [UsageEvent], indexedSessions: Int, scannedFiles: Int,
-                warnings: [String] = [], scannedAt: Date = Date()) {
+                warnings: [String] = [], scannedAt: Date = Date(), eventsRevision: UInt64? = nil) {
         self.events = events
         self.indexedSessions = indexedSessions
         self.scannedFiles = scannedFiles
         self.warnings = warnings
         self.scannedAt = scannedAt
+        self.eventsRevision = eventsRevision
     }
 }
 
