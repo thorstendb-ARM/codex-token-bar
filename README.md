@@ -35,7 +35,10 @@ assigned by the timestamp of each recorded token event; a request that spans the
 reset cannot be split into before/after portions.
 
 Periods use the Mac's local time zone. `K`, `M`, `B` and `T` mean thousand, million,
-billion and trillion tokens. Hover for the exact token count, freshness and warnings.
+billion and trillion tokens. Pause over the menu-bar item for the exact token count,
+freshness and warnings. The tooltip stays below that item and disappears when the
+pointer leaves, on a click, or when switching apps or Spaces. Briefly passing over
+the item does not show it.
 
 ## Build and test
 

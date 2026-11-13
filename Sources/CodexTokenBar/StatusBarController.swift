@@ -1,10 +1,11 @@
 import AppKit
 import TokenBarCore
 
-final class StatusBarController: NSObject, NSApplicationDelegate {
+final class StatusBarController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let builder: ReportBuilder
     private let worker = DispatchQueue(label: "CodexTokenBar.usage-index", qos: .utility)
     private var statusItem: NSStatusItem?
+    private var statusTooltip: StatusItemTooltip?
     private let menu = NSMenu()
     private var periodItems: [UsagePeriod: NSMenuItem] = [:]
     private let messageItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -32,8 +33,10 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
         if let button = item.button {
             button.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
             button.setAccessibilityLabel("Codex Token Usage")
+            statusTooltip = StatusItemTooltip(button: button)
         }
 
+        menu.delegate = self
         menu.autoenablesItems = false
         for period in UsagePeriod.allCases {
             let item = NSMenuItem(title: "", action: #selector(selectPeriod(_:)), keyEquivalent: "")
@@ -75,6 +78,15 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         timer?.invalidate()
+        statusTooltip?.invalidate()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        statusTooltip?.setMenuOpen(true)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        statusTooltip?.setMenuOpen(false)
     }
 
     @objc private func selectPeriod(_ sender: NSMenuItem) {
@@ -167,7 +179,7 @@ final class StatusBarController: NSObject, NSApplicationDelegate {
         var title = periodTitle(settings.selectedPeriod)
         if errorMessage != nil || hasIndexWarnings { title += " ⚠︎" }
         statusItem?.button?.title = title
-        statusItem?.button?.toolTip = tooltip()
+        statusTooltip?.update(text: tooltip())
         refreshItem.isEnabled = !isScanning
         currentStartedItem.title = "Current seit: \(currentStart)"
         resetCurrentItem.toolTip = "Startet eine neue manuelle Messung bei null und zeigt Current in der Menüleiste."
